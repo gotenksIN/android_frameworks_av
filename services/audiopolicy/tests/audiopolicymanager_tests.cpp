@@ -49,6 +49,7 @@
 #include "AudioPolicyTestClient.h"
 #include "AudioPolicyTestManager.h"
 #include "test_execution_tracer.h"
+#include "IOProfile.h"
 
 using namespace android;
 using testing::UnorderedElementsAre;
@@ -134,6 +135,113 @@ TEST(AudioPolicyConfigTest, LoadForTests) {
         EXPECT_FALSE(result.value()->getInputDevices().isEmpty());
         EXPECT_FALSE(result.value()->getOutputDevices().isEmpty());
     }
+}
+
+class AudioPolicyProfileSelectionTest : public testing::Test {
+  protected:
+    static void addProfile(AudioProfileVector& profiles, audio_format_t format,
+                           audio_channel_mask_t channelMask, uint32_t samplingRate) {
+        profiles.add(
+                new AudioProfile(format, ChannelMaskSet{channelMask}, SampleRateSet{samplingRate}));
+    }
+
+    static void expectPickedProfile(const sp<IOProfile>& profile, uint32_t expectedSamplingRate,
+                                    audio_channel_mask_t expectedChannelMask,
+                                    audio_format_t expectedFormat) {
+        uint32_t samplingRate = 0;
+        audio_channel_mask_t channelMask = AUDIO_CHANNEL_NONE;
+        audio_format_t format = AUDIO_FORMAT_DEFAULT;
+
+        profile->pickAudioProfile(samplingRate, channelMask, format);
+
+        EXPECT_EQ(expectedSamplingRate, samplingRate);
+        EXPECT_EQ(expectedChannelMask, channelMask);
+        EXPECT_EQ(expectedFormat, format);
+    }
+};
+
+TEST_F(AudioPolicyProfileSelectionTest, NonDirectMixPortDuplicateFormatsSelectsWiderChannel) {
+    sp<IOProfile> profile = new IOProfile("non_direct_mix_port", AUDIO_PORT_ROLE_SOURCE);
+    AudioProfileVector profiles;
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_STEREO, 48000);
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_7POINT1, 48000);
+    profile->setAudioProfiles(profiles);
+
+    expectPickedProfile(profile, 48000, AUDIO_CHANNEL_OUT_7POINT1, AUDIO_FORMAT_PCM_16_BIT);
+}
+
+TEST_F(AudioPolicyProfileSelectionTest, DirectOutputDuplicateFormatsSelectsNarrowChannel) {
+    sp<IOProfile> profile = new IOProfile("direct_output", AUDIO_PORT_ROLE_SOURCE);
+    profile->setFlags(AUDIO_OUTPUT_FLAG_DIRECT);
+    AudioProfileVector profiles;
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_5POINT1, 48000);
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_STEREO, 44100);
+    profile->setAudioProfiles(profiles);
+
+    expectPickedProfile(profile, 44100, AUDIO_CHANNEL_OUT_STEREO, AUDIO_FORMAT_PCM_16_BIT);
+}
+
+TEST_F(AudioPolicyProfileSelectionTest, NonDirectMixPortSameChannelCountSelectsHigherSampleRate) {
+    sp<IOProfile> profile = new IOProfile("non_direct_mix_port", AUDIO_PORT_ROLE_SOURCE);
+    AudioProfileVector profiles;
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_STEREO, 44100);
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_STEREO, 48000);
+    profile->setAudioProfiles(profiles);
+
+    expectPickedProfile(profile, 48000, AUDIO_CHANNEL_OUT_STEREO, AUDIO_FORMAT_PCM_16_BIT);
+}
+
+TEST_F(AudioPolicyProfileSelectionTest,
+       NonDirectMixPortPrefersWiderChannelEvenWithLowerSampleRate) {
+    sp<IOProfile> profile = new IOProfile("non_direct_mix_port", AUDIO_PORT_ROLE_SOURCE);
+    AudioProfileVector profiles;
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_STEREO, 96000);
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_5POINT1, 44100);
+    profile->setAudioProfiles(profiles);
+
+    expectPickedProfile(profile, 44100, AUDIO_CHANNEL_OUT_5POINT1, AUDIO_FORMAT_PCM_16_BIT);
+}
+
+TEST_F(AudioPolicyProfileSelectionTest, DirectOutputSameChannelCountSelectsLowerSampleRate) {
+    sp<IOProfile> profile = new IOProfile("direct_output", AUDIO_PORT_ROLE_SOURCE);
+    profile->setFlags(AUDIO_OUTPUT_FLAG_DIRECT);
+    AudioProfileVector profiles;
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_STEREO, 48000);
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_STEREO, 44100);
+    profile->setAudioProfiles(profiles);
+
+    expectPickedProfile(profile, 44100, AUDIO_CHANNEL_OUT_STEREO, AUDIO_FORMAT_PCM_16_BIT);
+}
+
+TEST_F(AudioPolicyProfileSelectionTest, DirectOutputPrefersNarrowChannelEvenWithHigherSampleRate) {
+    sp<IOProfile> profile = new IOProfile("direct_output", AUDIO_PORT_ROLE_SOURCE);
+    profile->setFlags(AUDIO_OUTPUT_FLAG_DIRECT);
+    AudioProfileVector profiles;
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_5POINT1, 44100);
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_STEREO, 48000);
+    profile->setAudioProfiles(profiles);
+
+    expectPickedProfile(profile, 48000, AUDIO_CHANNEL_OUT_STEREO, AUDIO_FORMAT_PCM_16_BIT);
+}
+
+TEST_F(AudioPolicyProfileSelectionTest, InputPortDuplicateFormatsSelectsWiderProfile) {
+    sp<IOProfile> profile = new IOProfile("input_port", AUDIO_PORT_ROLE_SINK);
+    AudioProfileVector profiles;
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_IN_MONO, 48000);
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_IN_STEREO, 48000);
+    profile->setAudioProfiles(profiles);
+
+    expectPickedProfile(profile, 48000, AUDIO_CHANNEL_IN_STEREO, AUDIO_FORMAT_PCM_16_BIT);
+}
+
+TEST_F(AudioPolicyProfileSelectionTest, HigherFormatBeatsLowerFormatWithHigherChannelCount) {
+    sp<IOProfile> profile = new IOProfile("multi_format_mix_port", AUDIO_PORT_ROLE_SOURCE);
+    AudioProfileVector profiles;
+    addProfile(profiles, AUDIO_FORMAT_PCM_16_BIT, AUDIO_CHANNEL_OUT_7POINT1, 48000);
+    addProfile(profiles, AUDIO_FORMAT_PCM_24_BIT_PACKED, AUDIO_CHANNEL_OUT_STEREO, 48000);
+    profile->setAudioProfiles(profiles);
+
+    expectPickedProfile(profile, 48000, AUDIO_CHANNEL_OUT_STEREO, AUDIO_FORMAT_PCM_24_BIT_PACKED);
 }
 
 TEST(AudioPolicyManagerTestInit, EngineFailure) {

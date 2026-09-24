@@ -1549,14 +1549,18 @@ void NuPlayer::Renderer::postDrainVideoQueue() {
         mMediaClock->updateMaxTimeMedia(mediaTimeUs + kDefaultVideoFrameIntervalUs);
     }
 
-    // VSync-driven video drain system
-    // Only defer to VSync once the anchor time is established (i.e. after the
-    // first frame has been scheduled via the normal path).  Before that point
-    // we must let the normal scheduling path run so that the MediaClock anchor
-    // is set; otherwise the renderer stalls waiting for a VSync that will never
-    // trigger a drain because the video queue appears empty to onVsyncEvent().
+    // VSync mode: once the anchor is set, VSync callbacks drive the drains.
+    // But a VSync tick is the only wake-up source (~one per refresh), so if a
+    // just-queued frame is already due by the real clock (e.g. audio EOS jumps
+    // the anchor and makes queued frames instantly due), post an immediate
+    // drain rather than waiting for the next tick and missing the 40ms
+    // deadline. Frames still in the future hit the VSync boundary check in
+    // onDrainVideoQueue, so on-time alignment is unaffected.
     if (mVsyncVideoModeEnabled && mHasVideo && mAnchorTimeMediaUs >= 0) {
-        // Anchor is set; defer all subsequent drains to the VSync callback.
+        if (getRealTimeUs(mediaTimeUs, nowUs) <= nowUs) {
+            msg->post();
+            mDrainVideoQueuePending = true;
+        }
         return;
     }
 
@@ -2633,25 +2637,18 @@ void NuPlayer::Renderer::onVsyncEvent(const sp<AMessage> &msg) {
         return;
     }
 
-    if (mDrainVideoQueuePending) {
-        // If VSync was skipped, the pending drain never fired and the frame
-        // is stuck. Detect this by checking if the new expectedPresentTime
-        // is more than one frame period ahead of the last one we stored —
-        // meaning at least one VSync tick was missed.
-        bool vsyncSkipped = mHasVsyncTiming && mLastVsyncPeriodNs > 0
-                && (expectedPresentTimeNs - mLastVsyncExpectedPresentTimeNs)
-                   > (mLastVsyncPeriodNs * 3 / 2);
-        if (!vsyncSkipped) {
-            ALOGV("VSync event: drain already in flight, skipping");
-            return;
-        }
-        ALOGV("VSync event: skipped VSync detected, clearing stale drain");
-        mDrainVideoQueuePending = false;
-    }
-
+    // Always advance to the latest boundary, even with a drain pending: the
+    // looper orders messages by timestamp, so a tick posted before a pending
+    // drain can run after it. Updating unconditionally keeps the boundary
+    // current for whichever drain runs next.
     mLastVsyncExpectedPresentTimeNs = expectedPresentTimeNs;
     mLastVsyncPeriodNs = vsyncPeriodNs;
     mHasVsyncTiming = true;
+
+    if (mDrainVideoQueuePending) {
+        ALOGV("VSync event: drain already in flight, skipping");
+        return;
+    }
 
     sp<AMessage> drainMsg = new AMessage(kWhatDrainVideoQueue, this);
     drainMsg->setInt32("drainGeneration", getDrainGeneration(false /* audio */));

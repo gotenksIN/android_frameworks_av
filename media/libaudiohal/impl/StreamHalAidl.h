@@ -97,6 +97,10 @@ class StreamContextAidl {
             ::aidl::android::hardware::audio::core::MmapBufferDescriptor&& desc) {
         mBufferSizeFrames = desc.sharedMemory.size / mFrameSizeBytes;
         mMmapBufferDescriptor = std::move(desc); }
+    void resetMmapBufferDescriptor() {
+        mMmapBufferDescriptor =
+                ::aidl::android::hardware::audio::core::MmapBufferDescriptor{};
+    }
 
   private:
     static std::unique_ptr<DataMQ> maybeCreateDataMQ(

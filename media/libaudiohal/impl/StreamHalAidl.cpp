@@ -174,6 +174,11 @@ StreamHalAidl::StreamHalAidl(std::string_view className, bool isInput, const aud
     } else {
         AUGMENT_LOG(E, "failed to retrieve stream interface version: %s", status.getMessage());
     }
+    if (mContext.isMmapped() && mSupportsCreateMmapBuffer) {
+       // with createMmapBuffer support enabled, the initial mmap buffer descriptor
+       // is never used.
+        mContext.resetMmapBufferDescriptor();
+    }
 }
 
 StreamHalAidl::~StreamHalAidl() {
